@@ -1,6 +1,7 @@
 //! Code heavily based on https://github.com/http-rs/tide/blob/4aec5fe2bb6b8202f7ae48e416eeb37345cf029f/backup/examples/staticfile.rs
 
-use async_std::{fs, future, io, task};
+use async_std::{future, io, task};
+use cap_async_std::fs;
 use http::{
     header::{self},
     StatusCode,
@@ -16,34 +17,37 @@ use tide::{Endpoint, Request, Response, Result};
 /// [`serve_static_files`]: tide_naive_static_files::serve_static_files
 ///
 /// ```no_run
+/// use cap_async_std::fs;
 /// use std::path::Path;
 /// use tide_naive_static_files::StaticRootDir;
 ///
-/// struct MyState;
+/// struct MyState {
+///     root_dir: fs::Dir,
+/// }
 ///
 /// impl StaticRootDir for MyState {
-///     fn root_dir(&self) -> &Path {
-///         Path::new("./my-static-assets-dir")
+///     fn root_dir(&self) -> &fs::Dir {
+///         &self.root_dir
 ///     }
 /// }
 /// ```
 pub trait StaticRootDir {
-    fn root_dir(&self) -> &Path;
+    fn root_dir(&self) -> &fs::Dir;
 }
 
 impl<T: StaticRootDir> StaticRootDir for &T {
-    fn root_dir(&self) -> &Path {
+    fn root_dir(&self) -> &fs::Dir {
         (*self).root_dir()
     }
 }
 
-async fn stream_bytes(root: PathBuf, actual_path: &str) -> io::Result<Response> {
-    let mut path = get_path(&root, actual_path);
+async fn stream_bytes(root: &fs::Dir, actual_path: &str) -> io::Result<Response> {
+    let mut path = get_path(actual_path);
 
     // Loop if the path points to a directory because we want to try looking for
     // an "index.html" file within that directory.
     let (meta, path): (fs::Metadata, PathBuf) = loop {
-        let meta = fs::metadata(&path).await.ok();
+        let meta = root.metadata(&path).await.ok();
 
         // If the file doesn't exist, then bail out.
         if meta.is_none() {
@@ -66,7 +70,7 @@ async fn stream_bytes(root: PathBuf, actual_path: &str) -> io::Result<Response> 
     let size = format!("{}", meta.len());
 
     // We're done with the checks. Stream file!
-    let file = fs::File::open(PathBuf::from(&path)).await.unwrap();
+    let file = root.open(&path).await.unwrap();
     let reader = io::BufReader::new(file);
     Ok(tide::Response::new(StatusCode::OK.as_u16())
         .body(reader)
@@ -74,10 +78,10 @@ async fn stream_bytes(root: PathBuf, actual_path: &str) -> io::Result<Response> 
         .set_mime(mime))
 }
 
-/// Percent-decode, normalize path components and return the final path joined with root.
+/// Percent-decode, normalize path components and return the final path.
 /// See https://github.com/iron/staticfile/blob/master/src/requested_path.rs
-fn get_path(root: &Path, path: &str) -> PathBuf {
-    let rel_path = Path::new(path)
+fn get_path(path: &str) -> PathBuf {
+    Path::new(path)
         .components()
         .fold(PathBuf::new(), |mut result, p| {
             match p {
@@ -92,8 +96,7 @@ fn get_path(root: &Path, path: &str) -> PathBuf {
             }
 
             result
-        });
-    root.join(rel_path)
+        })
 }
 
 /// Use in a tide [`tide::Route::get`](tide::Route::get) handler to serve static files from an
@@ -101,24 +104,35 @@ fn get_path(root: &Path, path: &str) -> PathBuf {
 /// implement the [`StaticRootDir`](tide_naive_static_files::StaticRootDir) trait.
 ///
 /// The static assets will be served from the route provided to the `app.at`
-/// function. In the example below, the file `./my-static-asset-dir/foo.html`
+/// function. In the example below, the file `foo.html` under the `root_dir`
 /// would be obtainable by making a GET request to
 /// `http://my.server.address/static/foo.html`.
 ///
 /// ```no_run
+/// use async_std::task;
+/// use cap_async_std::ambient_authority;
+/// use cap_async_std::fs;
 /// use std::path::Path;
-/// use tide_naive_static_files::{StaticRootDir, serve_static_files};
+/// use tide_naive_static_files::{serve_static_files, StaticRootDir};
 ///
-/// struct MyState;
+/// struct MyState {
+///     root_dir: fs::Dir,
+/// }
 ///
 /// impl StaticRootDir for MyState {
-///     fn root_dir(&self) -> &Path {
-///         Path::new("./my-static-asset-dir")
+///     fn root_dir(&self) -> &fs::Dir {
+///         &self.root_dir
 ///     }
 /// }
 ///
 /// # fn main() {
-/// let state = MyState;
+/// let state = MyState {
+///     root_dir: task::block_on(async {
+///         fs::Dir::open_ambient_dir("./my-static-asset-dir/", ambient_authority())
+///             .await
+///             .unwrap()
+///     }),
+/// };
 /// let mut app = tide::with_state(state);
 /// app.at("static/*path")
 ///     .get(|req| async { serve_static_files(req).await.unwrap() });
@@ -129,12 +143,11 @@ pub async fn serve_static_files(ctx: Request<impl StaticRootDir>) -> Result {
         "`tide_naive_static_files::serve_static_files` requires a `*path` glob param at the end!",
     );
     let root = ctx.state();
-    let resp =
-        task::block_on(async move { stream_bytes(PathBuf::from(root.root_dir()), &path).await })
-            .unwrap_or_else(|e| {
-                eprintln!("tide-naive-static-files internal error: {}", e);
-                internal_server_error("Internal server error reading file")
-            });
+    let resp = task::block_on(async move { stream_bytes(&root.root_dir(), &path).await })
+        .unwrap_or_else(|e| {
+            eprintln!("tide-naive-static-files internal error: {}", e);
+            internal_server_error("Internal server error reading file")
+        });
 
     Ok(resp)
 }
@@ -149,17 +162,24 @@ pub async fn serve_static_files(ctx: Request<impl StaticRootDir>) -> Result {
 /// `http://my.server.address/static/foo.html`.
 ///
 /// ```no_run
+/// use async_std::task;
+/// use cap_async_std::ambient_authority;
+/// use cap_async_std::fs;
 /// use tide_naive_static_files::StaticFilesEndpoint;
 ///
 /// # fn main() {
 /// let mut app = tide::new();
 /// app.at("/static").strip_prefix().get(StaticFilesEndpoint {
-///     root: "./my-static-asset-dir/".into(),
+///     root: task::block_on(async {
+///         fs::Dir::open_ambient_dir("./my-static-asset-dir/", ambient_authority())
+///             .await
+///             .unwrap()
+///     }),
 /// });
 /// # }
 /// ```
 pub struct StaticFilesEndpoint {
-    pub root: PathBuf,
+    pub root: fs::Dir,
 }
 
 type BoxFuture<T> = Pin<Box<dyn future::Future<Output = T> + Send>>;
@@ -172,7 +192,7 @@ impl<State> Endpoint<State> for StaticFilesEndpoint {
         let root = self.root.clone();
 
         Box::pin(async move {
-            stream_bytes(root, &path).await.unwrap_or_else(|e| {
+            stream_bytes(&root, &path).await.unwrap_or_else(|e| {
                 eprintln!("tide-naive-static-files internal error: {}", e);
                 internal_server_error("Internal server error reading file")
             })

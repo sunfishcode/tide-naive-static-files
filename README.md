@@ -1,4 +1,14 @@
-# tide-naive-static-files
+# tide-naive-static-files, ported to cap-async-std
+
+This is a port of [tide-naive-static-files] to [cap-async-std]. By using
+[`cap_async_std::fs::Dir`], it refuses to follow symlinks which lead to paths
+outside of the directory it's configured to serve from.
+
+[tide-naive-static-files]: https://github.com/eignnx/tide-naive-static-files
+[cap-async-std]: https://crates.io/crates/cap-async-std
+[`cap_async_std::fs::Dir`]: https://docs.rs/cap-async-std/latest/cap_async_std/fs/struct.Dir.html
+
+Original README from upstream repository follows...
 
 A simple static file serving component for Rust's Tide web framework.
 

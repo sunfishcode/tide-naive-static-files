@@ -1,12 +1,12 @@
-use std::path::{Path, PathBuf};
+use cap_async_std::{ambient_authority, fs};
 use tide_naive_static_files::{serve_static_files, StaticRootDir};
 
 struct AppState {
-    static_root_dir: PathBuf,
+    static_root_dir: fs::Dir,
 }
 
 impl StaticRootDir for AppState {
-    fn root_dir(&self) -> &Path {
+    fn root_dir(&self) -> &fs::Dir {
         &self.static_root_dir
     }
 }
@@ -14,7 +14,13 @@ impl StaticRootDir for AppState {
 #[async_std::main]
 async fn main() -> std::io::Result<()> {
     let mut app = tide::with_state(AppState {
-        static_root_dir: "./examples/static-example-files/".into(),
+        // Obtain the directory using "ambient" permissions. All other
+        // operations on `Dir` are sandboxed to stay within this directory.
+        static_root_dir: fs::Dir::open_ambient_dir(
+            "./examples/static-example-files/",
+            ambient_authority(),
+        )
+        .await?,
     });
 
     app.at("static/*path")
